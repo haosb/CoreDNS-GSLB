@@ -131,9 +131,13 @@ Commands:
 }
 
 func backendsCmd(args []string, api string, cfg Config) {
+	os.Exit(runBackendsCmd(args, api, cfg, os.Stdout, os.Stderr))
+}
+
+func runBackendsCmd(args []string, api string, cfg Config, stdout, stderr io.Writer) int {
 	if len(args) < 1 {
 		usage()
-		os.Exit(1)
+		return 1
 	}
 	sub := args[0]
 	fs := flag.NewFlagSet("backends "+sub, flag.ExitOnError)
@@ -162,21 +166,21 @@ func backendsCmd(args []string, api string, cfg Config) {
 		endpoint = "/api/backends/disable"
 	default:
 		usage()
-		os.Exit(1)
+		return 1
 	}
 
 	req, err := http.NewRequest("POST", api+endpoint, bytes.NewReader(jsonBody))
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "API error: %v\n", err)
-		os.Exit(2)
+		fmt.Fprintf(stderr, "API error: %v\n", err)
+		return 2
 	}
 	addAuth(req, cfg)
 	req.Header.Set("Content-Type", "application/json")
 	client := &http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "API error: %v\n", err)
-		os.Exit(2)
+		fmt.Fprintf(stderr, "API error: %v\n", err)
+		return 2
 	}
 	defer resp.Body.Close()
 	data, _ := io.ReadAll(resp.Body)
@@ -194,51 +198,62 @@ func backendsCmd(args []string, api string, cfg Config) {
 	}
 	var r apiResp
 	if os.Getenv("GSLBCTL_DEBUG") != "" {
-		fmt.Fprintf(os.Stderr, "[gslbctl debug] Raw API response: %s\n", string(data))
+		fmt.Fprintf(stderr, "[gslbctl debug] Raw API response: %s\n", string(data))
 	}
 	if err := json.Unmarshal(data, &r); err == nil {
 		if os.Getenv("GSLBCTL_DEBUG") != "" {
-			fmt.Fprintf(os.Stderr, "[gslbctl debug] Parsed struct: %+v\n", r)
+			fmt.Fprintf(stderr, "[gslbctl debug] Parsed struct: %+v\n", r)
 		}
 		if r.Success {
 			if len(r.Backends) > 0 {
-				w := tabwriter.NewWriter(os.Stdout, 2, 4, 2, ' ', 0)
+				w := tabwriter.NewWriter(stdout, 2, 4, 2, ' ', 0)
 				fmt.Fprintln(w, "RECORD\tBACKEND")
 				for _, be := range r.Backends {
 					fmt.Fprintf(w, "%s\t%s\n", be.Record, be.Address)
 				}
 				w.Flush()
 			} else {
-				fmt.Println("No backends matched your criteria.")
+				fmt.Fprintln(stdout, "No backends matched your criteria.")
 			}
-		} else {
-			if r.Error != "" {
-				fmt.Fprintf(os.Stderr, "Error: %s\n", r.Error)
-			} else {
-				fmt.Fprintf(os.Stderr, "Operation failed.\n")
-			}
+			return 0
 		}
-		return
+		if r.Error != "" {
+			fmt.Fprintf(stderr, "Error: %s\n", r.Error)
+		} else {
+			fmt.Fprintf(stderr, "Operation failed.\n")
+		}
+		return 1
 	}
 	// fallback: raw output
-	fmt.Println(string(data))
+	fmt.Fprintln(stdout, string(data))
+	return 1
 }
 
 func statusCmd(api string, cfg Config) {
+	os.Exit(runStatusCmd(api, cfg, os.Stdout, os.Stderr))
+}
+
+func runStatusCmd(api string, cfg Config, stdout, stderr io.Writer) int {
 	req, err := http.NewRequest("GET", api+"/api/overview", nil)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "API error: %v\n", err)
-		os.Exit(2)
+		fmt.Fprintf(stderr, "API error: %v\n", err)
+		return 2
 	}
 	addAuth(req, cfg)
 	client := &http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "API error: %v\n", err)
-		os.Exit(2)
+		fmt.Fprintf(stderr, "API error: %v\n", err)
+		return 2
 	}
 	defer resp.Body.Close()
 	data, _ := io.ReadAll(resp.Body)
+
+	if resp.StatusCode != http.StatusOK {
+		fmt.Fprintf(stderr, "API returned status %d\n", resp.StatusCode)
+		fmt.Fprintln(stdout, string(data))
+		return 1
+	}
 
 	// Try to parse and print as table
 
@@ -254,7 +269,7 @@ func statusCmd(api string, cfg Config) {
 	}
 	var overview map[string][]record
 	if err := json.Unmarshal(data, &overview); err == nil {
-		w := tabwriter.NewWriter(os.Stdout, 2, 4, 2, ' ', 0)
+		w := tabwriter.NewWriter(stdout, 2, 4, 2, ' ', 0)
 		fmt.Fprintln(w, "ZONE\tRECORD\tSTATUS\tBACKEND\tALIVE\tLAST_HEALTHCHECK")
 		// Sort zones for stable output
 		zones := make([]string, 0, len(overview))
@@ -271,16 +286,17 @@ func statusCmd(api string, cfg Config) {
 			}
 		}
 		w.Flush()
-		return
+		return 0
 	}
 	// fallback: pretty JSON
 	var pretty bytes.Buffer
 	err = json.Indent(&pretty, data, "", "  ")
 	if err != nil {
-		fmt.Println(string(data))
+		fmt.Fprintln(stdout, string(data))
 	} else {
-		fmt.Println(pretty.String())
+		fmt.Fprintln(stdout, pretty.String())
 	}
+	return 1
 }
 
 func validateCmd(args []string) {

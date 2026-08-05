@@ -184,28 +184,46 @@ func TestBackendsCmd_EnableDisable(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	old := os.Stdout
-	r, w, _ := os.Pipe()
-	os.Stdout = w
-
 	cfg := Config{User: "admin", Pass: "secret"}
-	backendsCmd([]string{"enable", "--tags", "t1,t2", "--address", "1.2.3.4", "--location", "us"}, ts.URL, cfg)
+	var stdout, stderr bytes.Buffer
+	code := runBackendsCmd([]string{"enable", "--tags", "t1,t2", "--address", "1.2.3.4", "--location", "us"}, ts.URL, cfg, &stdout, &stderr)
 
-	w.Close()
-	os.Stdout = old
-	var buf bytes.Buffer
-	_, _ = io.Copy(&buf, r)
-
+	assert.Equal(t, 0, code)
 	assert.True(t, serverCalled)
 	assert.Equal(t, "/api/backends/enable", requestPath)
-	assert.Contains(t, buf.String(), "api.example.com.")
-	assert.Contains(t, buf.String(), "1.2.3.4")
+	assert.Contains(t, stdout.String(), "api.example.com.")
+	assert.Contains(t, stdout.String(), "1.2.3.4")
 
 	var parsedBody map[string]interface{}
 	err := json.Unmarshal(requestBody, &parsedBody)
 	assert.NoError(t, err)
 	assert.Equal(t, "1.2.3.4", parsedBody["address_prefix"])
 	assert.Equal(t, "us", parsedBody["location"])
+}
+
+func TestBackendsCmd_APIFailure(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"success": false, "error": "something went wrong"}`))
+	}))
+	defer ts.Close()
+
+	var stdout, stderr bytes.Buffer
+	code := runBackendsCmd([]string{"enable"}, ts.URL, Config{}, &stdout, &stderr)
+	assert.Equal(t, 1, code)
+	assert.Contains(t, stderr.String(), "something went wrong")
+}
+
+func TestBackendsCmd_InvalidJSON(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`not json`))
+	}))
+	defer ts.Close()
+
+	var stdout, stderr bytes.Buffer
+	code := runBackendsCmd([]string{"enable"}, ts.URL, Config{}, &stdout, &stderr)
+	assert.Equal(t, 1, code)
 }
 
 func TestStatusCmd(t *testing.T) {
@@ -229,20 +247,39 @@ func TestStatusCmd(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	old := os.Stdout
-	r, w, _ := os.Pipe()
-	os.Stdout = w
-
 	cfg := Config{}
-	statusCmd(ts.URL, cfg)
+	var stdout, stderr bytes.Buffer
+	code := runStatusCmd(ts.URL, cfg, &stdout, &stderr)
 
-	w.Close()
-	os.Stdout = old
-	var buf bytes.Buffer
-	_, _ = io.Copy(&buf, r)
+	assert.Equal(t, 0, code)
+	assert.Contains(t, stdout.String(), "example.com.")
+	assert.Contains(t, stdout.String(), "api.example.com.")
+	assert.Contains(t, stdout.String(), "healthy")
+	assert.Contains(t, stdout.String(), "1.2.3.4")
+}
 
-	assert.Contains(t, buf.String(), "example.com.")
-	assert.Contains(t, buf.String(), "api.example.com.")
-	assert.Contains(t, buf.String(), "healthy")
-	assert.Contains(t, buf.String(), "1.2.3.4")
+func TestStatusCmd_HTTPError(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error": "boom"}`))
+	}))
+	defer ts.Close()
+
+	var stdout, stderr bytes.Buffer
+	code := runStatusCmd(ts.URL, Config{}, &stdout, &stderr)
+	assert.Equal(t, 1, code)
+	assert.Contains(t, stderr.String(), "API returned status 500")
+}
+
+func TestStatusCmd_InvalidJSON(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`not json`))
+	}))
+	defer ts.Close()
+
+	var stdout, stderr bytes.Buffer
+	code := runStatusCmd(ts.URL, Config{}, &stdout, &stderr)
+	assert.Equal(t, 1, code)
 }
